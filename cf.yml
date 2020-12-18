@@ -52,7 +52,7 @@ Parameters:
 
   CurseForgeModPack:
     Type: String
-    Description: "CurseForge ModPack Zip file uploaded in s3://mc-modpacks/"
+    Description: "CurseForge ModPack Zip file uploaded in s3://mc-modpacks/ bucket"
     Default: ''
 
   AdminPlayerNames:
@@ -134,7 +134,7 @@ Conditions:
   IpAddressProvided: !Not [ !Equals [ !Ref YourIp, '' ] ]
   DnsConfigEnabled: !And [ !Not [ !Equals [ !Ref HostedZoneId, '' ] ], !Not [ !Equals [ !Ref RecordName, '' ] ] ]
   SpotPriceProvided: !Not [ !Equals [ !Ref SpotPrice, '' ] ]
-  ModPackProvided: !Not [ !Equals [ !Ref SpotPrice, '' ] ]
+  ModPackProvided: !Not [ !Equals [ !Ref CurseForgeModPack, '' ] ]
 
 Mappings:
   ServerState:
@@ -249,8 +249,12 @@ Resources:
         ToPort: 2049
         IpProtocol: tcp
         SourceSecurityGroupId: !Ref Ec2Sg
-      VpcId: !Ref Vpc
-      
+      VpcId: !Ref Vpc 
+  CloudWatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref AWS::StackName
+      RetentionInDays: 365
   # ====================================================
   # INSTANCE CONFIG
   # ====================================================
@@ -290,13 +294,19 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash -xe
           yum install -y amazon-efs-utils
+          yum install -y unzip
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          ./aws/install
           mkdir /opt/minecraft
           mount -t efs ${Efs}:/ /opt/minecraft
           chown 845:845 /opt/minecraft
-          echo "Copying ${CurseForgeModPack} from s3 to ec2"
-          aws s3 cp s3://mc-modpacks/${CurseForgeModPack} /opt/minecraft/${CurseForgeModPack}
-          chown ec2-user ${CurseForgeModPack}
-          echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config          
+          # echo "Copying ${CurseForgeModPack} from s3 to ec2"
+          # aws s3 cp s3://mc-modpacks/${CurseForgeModPack} /opt/minecraft/${CurseForgeModPack}
+          # chown ec2-user ${CurseForgeModPack}
+          echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config    
+          echo ECS_AVAILABLE_LOGGING_DRIVERS='[\"json-file\", \"awslogs\"]' >> /etc/ecs/ecs.config
+      
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -328,6 +338,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
         - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::215445452083:policy/WriteLogsForEC2
       Policies:
         - PolicyName: root
           PolicyDocument: 
@@ -401,12 +412,16 @@ Resources:
               - Name: "WHITELIST"
                 Value: !Sub "${Whitelist}"
               - !Ref 'AWS::NoValue'
-
             - !If
               - ModPackProvided
               - Name: "CF_SERVER_MOD"
                 Value: !Sub "${CurseForgeModPack}"
               - !Ref 'AWS::NoValue'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogsGroup
+              awslogs-region: !Ref AWS::Region
 
   # ====================================================
   # SET DNS RECORD
