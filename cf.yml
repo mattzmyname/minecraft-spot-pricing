@@ -50,9 +50,10 @@ Parameters:
     Description: "Java version (Examples include latest, adopt13, openj9, etc) Refer to tag descriptions available here: https://github.com/itzg/docker-minecraft-server)"
     Default: 'latest'
 
-  MinecraftTypeTag:
+  CurseForgeModPack:
     Type: String
-    Description: "(Examples include SPIGOT, BUKKIT, TUINITY, etc) Refer to tag descriptions available here: https://github.com/itzg/docker-minecraft-server)"
+    Description: "CurseForge ModPack Zip file uploaded in s3://mc-modpacks/ bucket"
+    Default: ''
 
   AdminPlayerNames:
     Type: String
@@ -85,7 +86,7 @@ Metadata:
       - Label:
           default: Optional Server Settings
         Parameters:
-        - MinecraftTypeTag
+        - CurseForgeModPack
         - AdminPlayerNames
         - Difficulty
         - Whitelist
@@ -108,8 +109,8 @@ Metadata:
         default: "Maximum spot price per hour? Leave blank to disable spot pricing."
       MinecraftImageTag:
         default: "Which version of Minecraft do you want to launch?"
-      MinecraftTypeTag:
-        default: "Which type of Minecraft do you want to launch?"
+      CurseForgeModPack:
+        default: "Which Curse Forge ModPack do you want to launch (Optional)? This will launch a CurseForge server."
       AdminPlayerNames:
         default: "A comma delimited list (no spaces) of player names to be admins"
       Difficulty:
@@ -126,7 +127,6 @@ Metadata:
         default: "If you have a hosted zone in Route 53 and wish to set a DNS record whenever your Minecraft instance starts, supply a record name here (e.g. minecraft.mydomain.com)."
 
 Conditions:
-  MinecraftTypeTagProvided: !Not [ !Equals [ !Ref MinecraftTypeTag, '' ] ]
   AdminPlayerNamesProvided: !Not [ !Equals [ !Ref AdminPlayerNames, '' ] ]
   DifficultyProvided: !Not [ !Equals [ !Ref Difficulty, '' ] ]
   WhitelistProvided: !Not [ !Equals [ !Ref Whitelist, '' ] ]
@@ -134,7 +134,7 @@ Conditions:
   IpAddressProvided: !Not [ !Equals [ !Ref YourIp, '' ] ]
   DnsConfigEnabled: !And [ !Not [ !Equals [ !Ref HostedZoneId, '' ] ], !Not [ !Equals [ !Ref RecordName, '' ] ] ]
   SpotPriceProvided: !Not [ !Equals [ !Ref SpotPrice, '' ] ]
-
+  ModPackProvided: !Not [ !Equals [ !Ref CurseForgeModPack, '' ] ]
 
 Mappings:
   ServerState:
@@ -249,8 +249,12 @@ Resources:
         ToPort: 2049
         IpProtocol: tcp
         SourceSecurityGroupId: !Ref Ec2Sg
-      VpcId: !Ref Vpc
-      
+      VpcId: !Ref Vpc 
+  CloudWatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref AWS::StackName
+      RetentionInDays: 365
   # ====================================================
   # INSTANCE CONFIG
   # ====================================================
@@ -290,10 +294,19 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash -xe
           yum install -y amazon-efs-utils
+          yum install -y unzip
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          ./aws/install
           mkdir /opt/minecraft
           mount -t efs ${Efs}:/ /opt/minecraft
           chown 845:845 /opt/minecraft
-          echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config          
+          # echo "Copying ${CurseForgeModPack} from s3 to ec2"
+          # aws s3 cp s3://mc-modpacks/${CurseForgeModPack} /opt/minecraft/${CurseForgeModPack}
+          # chown ec2-user ${CurseForgeModPack}
+          echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config    
+          echo ECS_AVAILABLE_LOGGING_DRIVERS='[\"json-file\", \"awslogs\"]' >> /etc/ecs/ecs.config
+      
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -324,6 +337,8 @@ Resources:
           - sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::215445452083:policy/WriteLogsForEC2
       Policies:
         - PolicyName: root
           PolicyDocument: 
@@ -378,9 +393,9 @@ Resources:
             - Name: "EULA"
               Value: "TRUE"
             - !If
-              - MinecraftTypeTagProvided
+              - ModPackProvided
               - Name: "TYPE"
-                Value: !Sub "${MinecraftTypeTag}"
+                Value: !Sub "CURSEFORGE"
               - !Ref 'AWS::NoValue'
             - !If
               - AdminPlayerNamesProvided
@@ -397,6 +412,16 @@ Resources:
               - Name: "WHITELIST"
                 Value: !Sub "${Whitelist}"
               - !Ref 'AWS::NoValue'
+            - !If
+              - ModPackProvided
+              - Name: "CF_SERVER_MOD"
+                Value: !Sub "${CurseForgeModPack}"
+              - !Ref 'AWS::NoValue'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogsGroup
+              awslogs-region: !Ref AWS::Region
 
   # ====================================================
   # SET DNS RECORD
